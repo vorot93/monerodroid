@@ -1092,9 +1092,9 @@ fun BinaryStatusCard(
                     )
                 }
 
-                is BinaryStatus.InstallingBundled -> {
+                is BinaryStatus.Verifying -> {
                     Text(
-                        text = "INSTALLING BUNDLED BINARY...",
+                        text = "VERIFYING SIGNATURE...",
                         color = MoneroOrange,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold

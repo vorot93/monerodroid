@@ -522,6 +522,26 @@ fun UpdateSection(
                 }
             }
 
+            is UpdateStatus.Verifying -> {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    CircularProgressIndicator(
+                        color = MoneroOrange,
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "Verifying signature...",
+                        color = MoneroOrange,
+                        fontSize = 14.sp
+                    )
+                }
+            }
+
             is UpdateStatus.Extracting -> {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
