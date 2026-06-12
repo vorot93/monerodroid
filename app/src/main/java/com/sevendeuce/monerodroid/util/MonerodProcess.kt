@@ -56,21 +56,10 @@ class MonerodProcess(private val context: Context) {
 
     private fun isProcessRunningByName(): Boolean {
         return try {
-            // Try pidof first
-            val pidofProcess = ProcessBuilder("pidof", "monerod")
-                .redirectErrorStream(true)
-                .start()
-            val output = pidofProcess.inputStream.bufferedReader().readText().trim()
-            pidofProcess.waitFor(2, TimeUnit.SECONDS)
-            if (output.isNotEmpty()) return true
-
-            // Also check for libmonerod.so (bundled binary name)
-            val pidofProcess2 = ProcessBuilder("pidof", "libmonerod.so")
-                .redirectErrorStream(true)
-                .start()
-            val output2 = pidofProcess2.inputStream.bufferedReader().readText().trim()
-            pidofProcess2.waitFor(2, TimeUnit.SECONDS)
-            output2.isNotEmpty()
+            val p = ProcessBuilder("pidof", "monerod").redirectErrorStream(true).start()
+            val out = p.inputStream.bufferedReader().readText().trim()
+            p.waitFor(2, TimeUnit.SECONDS)
+            out.isNotEmpty()
         } catch (e: Exception) {
             false
         }
@@ -133,79 +122,24 @@ class MonerodProcess(private val context: Context) {
 
             Log.d(TAG, "Command: ${command.joinToString(" ")}")
 
-            val processBuilder = ProcessBuilder(command)
+            // Linker-only execution (minSdk 29). Run monerod via the arch-matched system linker,
+            // which loads it via mmap(PROT_EXEC) and bypasses the SELinux execute_no_trans denial
+            // on app_data_file. No bundled fallback exists.
+            val linkerPath = BinaryExecutor.linkerForArch(BinaryExecutor.is64BitArch())
+            val linkerCommand = BinaryExecutor.linkerCommand(linkerPath, binaryPath, command.drop(1))
+            Log.d(TAG, "Linker command: ${linkerCommand.joinToString(" ")}")
+
+            val processBuilder = ProcessBuilder(linkerCommand)
                 .directory(dataDir)
                 .redirectErrorStream(true)
-
-            // Set environment variables
             processBuilder.environment()["HOME"] = context.filesDir.absolutePath
             processBuilder.environment()["TMPDIR"] = context.cacheDir.absolutePath
 
-            Log.d(TAG, "Starting process...")
-
             try {
                 process = processBuilder.start()
-                Log.d(TAG, "Process started successfully, isAlive: ${process?.isAlive}")
-            } catch (e: java.io.IOException) {
-                // On Android 10+, SELinux denies execute_no_trans for app_data_file,
-                // blocking execve() on binaries in the app's data directory.
-                // Java's canExecute() checks file permission bits but NOT SELinux policy,
-                // so the binary appears executable but the kernel blocks it with error=13.
-                if (e.message?.contains("Permission denied") != true) {
-                    Log.e(TAG, "Failed to start process", e)
-                    return@withContext Result.failure(e)
-                }
-
-                Log.w(TAG, "Direct execution blocked (Android 10+ SELinux), trying linker trick")
-
-                // Fallback 1: System linker trick — execute via /system/bin/linker64.
-                // The linker loads the binary via mmap(PROT_EXEC) which bypasses the
-                // execute_no_trans denial, since SELinux grants the execute (mmap) permission.
-                val linkerPath = MonerodBinaryManager.getSystemLinkerPath()
-                if (linkerPath != null) {
-                    try {
-                        val linkerCommand = mutableListOf(linkerPath)
-                        linkerCommand.addAll(command)
-                        Log.d(TAG, "Linker trick command: ${linkerCommand.joinToString(" ")}")
-                        val linkerBuilder = ProcessBuilder(linkerCommand)
-                            .directory(dataDir)
-                            .redirectErrorStream(true)
-                        linkerBuilder.environment()["HOME"] = context.filesDir.absolutePath
-                        linkerBuilder.environment()["TMPDIR"] = context.cacheDir.absolutePath
-                        process = linkerBuilder.start()
-                        Log.d(TAG, "Linker trick started successfully, isAlive: ${process?.isAlive}")
-                    } catch (e2: Exception) {
-                        Log.w(TAG, "Linker trick failed, falling back to bundled binary", e2)
-                        process = null
-                    }
-                }
-
-                // Fallback 2: Bundled binary from nativeLibDir (always executable).
-                if (process == null) {
-                    val bundledBinary = storageManager.getNativeLibMonerodPath()
-                    if (bundledBinary != null && bundledBinary.exists()) {
-                        Log.w(TAG, "Falling back to bundled binary: ${bundledBinary.absolutePath}")
-                        command[0] = bundledBinary.absolutePath
-                        Log.d(TAG, "Fallback command: ${command.joinToString(" ")}")
-                        val fallbackBuilder = ProcessBuilder(command)
-                            .directory(dataDir)
-                            .redirectErrorStream(true)
-                        fallbackBuilder.environment()["HOME"] = context.filesDir.absolutePath
-                        fallbackBuilder.environment()["TMPDIR"] = context.cacheDir.absolutePath
-                        try {
-                            process = fallbackBuilder.start()
-                            Log.d(TAG, "Bundled binary started successfully, isAlive: ${process?.isAlive}")
-                        } catch (e2: Exception) {
-                            Log.e(TAG, "Failed to start bundled binary too", e2)
-                            return@withContext Result.failure(e2)
-                        }
-                    } else {
-                        Log.e(TAG, "No bundled binary available for fallback")
-                        return@withContext Result.failure(e)
-                    }
-                }
+                Log.d(TAG, "Process started, isAlive: ${process?.isAlive}")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to start process", e)
+                Log.e(TAG, "Failed to start monerod via linker", e)
                 return@withContext Result.failure(e)
             }
 
