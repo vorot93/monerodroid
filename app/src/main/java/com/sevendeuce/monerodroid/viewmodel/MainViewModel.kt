@@ -137,9 +137,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Observe download service status
         viewModelScope.launch {
             BinaryDownloadService.binaryStatusFlow.collect { status ->
-                // The service's static initial value is NotInstalled.
-                // Don't let it overwrite our accurate check from checkBinaryStatus()
-                // which correctly detects the bundled binary in nativeLibDir.
+                // Ignore the service's static initial NotInstalled if we already have a binary.
                 if (status is BinaryStatus.NotInstalled && binaryManager.isBinaryInstalled()) {
                     return@collect
                 }
@@ -344,10 +342,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun downloadBinary() {
         BinaryDownloadService.startDownload(context)
-    }
-
-    fun isBundledBinaryAvailable(): Boolean {
-        return binaryManager.isBundledBinaryAvailable()
     }
 
     fun setUseExternalStorage(external: Boolean) {

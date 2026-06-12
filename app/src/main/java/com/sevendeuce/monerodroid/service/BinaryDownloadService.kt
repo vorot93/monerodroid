@@ -90,11 +90,11 @@ class BinaryDownloadService : Service() {
                                     } / ${String.format("%.1f", status.totalMb)} MB"
                                 )
                             }
+                            is BinaryStatus.Verifying -> {
+                                updateNotification("Verifying monerod signature…")
+                            }
                             is BinaryStatus.Extracting -> {
                                 updateNotification("Extracting monerod...")
-                            }
-                            is BinaryStatus.InstallingBundled -> {
-                                updateNotification("Installing bundled binary...")
                             }
                             is BinaryStatus.Installed -> {
                                 updateNotification("Download complete")
@@ -123,6 +123,9 @@ class BinaryDownloadService : Service() {
                                         String.format("%.1f", status.downloadedMb)
                                     } / ${String.format("%.1f", status.totalMb)} MB"
                                 )
+                            }
+                            is UpdateStatus.Verifying -> {
+                                updateNotification("Verifying update signature…")
                             }
                             is UpdateStatus.Extracting -> {
                                 updateNotification("Extracting update...")
