@@ -90,6 +90,7 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.gson)
+    implementation(libs.pgpainless.sop)
 
     // NetCipher for Orbot/Tor integration
     implementation("info.guardianproject.netcipher:netcipher:2.1.0")
