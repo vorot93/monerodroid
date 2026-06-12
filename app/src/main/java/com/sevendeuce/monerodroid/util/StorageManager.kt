@@ -89,34 +89,11 @@ class StorageManager(private val context: Context) {
     }
 
     fun getMonerodBinaryPath(): File {
-        // Prefer updated/copied binary in writable app data (takes precedence after updates)
-        val copiedBinary = getWritableBinaryPath()
-        if (copiedBinary.exists()) {
-            if (copiedBinary.canExecute()) {
-                return copiedBinary
-            }
-            // Binary exists but not executable — attempt to fix permissions
-            copiedBinary.setExecutable(true, false)
-            if (copiedBinary.canExecute()) {
-                return copiedBinary
-            }
-            // Try chmod as fallback
-            try {
-                val process = Runtime.getRuntime().exec(arrayOf("chmod", "755", copiedBinary.absolutePath))
-                process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
-                if (copiedBinary.canExecute()) {
-                    return copiedBinary
-                }
-            } catch (_: Exception) {}
+        val binary = getWritableBinaryPath()
+        if (binary.exists() && !binary.canExecute()) {
+            binary.setExecutable(true, false)
         }
-        // Fall back to bundled binary in native lib dir
-        val nativeLibDir = context.applicationInfo.nativeLibraryDir
-        val bundledBinary = File(nativeLibDir, "libmonerod.so")
-        if (bundledBinary.exists() && bundledBinary.canExecute()) {
-            return bundledBinary
-        }
-        // Default to writable path for initial download
-        return copiedBinary
+        return binary
     }
 
     /**
@@ -125,12 +102,6 @@ class StorageManager(private val context: Context) {
      */
     fun getWritableBinaryPath(): File {
         return File(getBinaryDir(), "monerod")
-    }
-
-    fun getNativeLibMonerodPath(): File? {
-        val nativeLibDir = context.applicationInfo.nativeLibraryDir
-        val bundledBinary = File(nativeLibDir, "libmonerod.so")
-        return if (bundledBinary.exists()) bundledBinary else null
     }
 
     fun getConfigFilePath(): File {
