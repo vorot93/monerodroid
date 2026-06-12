@@ -28,7 +28,7 @@
 - **Background Service** - Node runs as a foreground service with persistent notification
 - **Start on Boot** - Optionally auto-start the node when your device boots
 - **Real-time Status** - Monitor sync progress, peer connections, and node health
-- **Auto-Update** - Check for and install monerod updates directly from the app
+- **Auto-Update** - monerod is downloaded from the official getmonero.org source on first run and on update, and verified against binaryFate's GPG-signed `hashes.txt` (SHA-256) before use
 - **Material 3 Design** - Modern dark theme with Monero orange accents
 
 ## Screenshots
@@ -41,13 +41,14 @@
 
 ### Device Requirements
 
-- **Android Version:** Android 7.0 (API 24) or higher
+- **Android Version:** Android 10.0 (API 29) or higher
 - **Architecture:** ARM64 (arm64-v8a) or ARM32 (armeabi-v7a)
 - **Storage:** 
   - Pruned node: ~50GB free space
   - Full node: ~300GB free space
 - **RAM:** 2GB+ recommended
-- **Network:** Stable internet connection for P2P sync
+- **Network:** Stable internet connection for P2P sync and monerod download
+- **First Run:** Network connection required to download monerod (~25–30 MB compressed)
 
 ### Permissions
 
@@ -156,9 +157,6 @@ monerodroid/
 │   │   │   │   └── ArchitectureDetector.kt
 │   │   │   ├── viewmodel/      # MainViewModel
 │   │   │   └── MainActivity.kt
-│   │   ├── jniLibs/            # Bundled monerod binaries
-│   │   │   ├── arm64-v8a/libmonerod.so
-│   │   │   └── armeabi-v7a/libmonerod.so
 │   │   └── res/                # Resources
 │   └── build.gradle.kts
 ├── .github/workflows/          # CI/CD pipelines
