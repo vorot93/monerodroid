@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId = "com.sevendeuce.monerodroid"
-        minSdk = 24
+        minSdk = 29
         targetSdk = 35
         versionCode = 16
         versionName = "1.0.16"
@@ -22,10 +22,6 @@ android {
 
     buildTypes {
         debug {
-            // Allow all ABIs in debug for emulator testing
-            ndk {
-                abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
-            }
         }
         release {
             isMinifyEnabled = false
@@ -33,20 +29,6 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Only ARM for release (actual Android devices)
-            ndk {
-                abiFilters += listOf("armeabi-v7a", "arm64-v8a")
-            }
-        }
-    }
-
-    // Splits for smaller APKs per architecture (optional for Play Store)
-    splits {
-        abi {
-            isEnable = false // Set to true for split APKs
-            reset()
-            include("armeabi-v7a", "arm64-v8a")
-            isUniversalApk = true
         }
     }
     compileOptions {
@@ -62,8 +44,8 @@ android {
     }
 
     packaging {
-        jniLibs {
-            useLegacyPackaging = true
+        resources {
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         }
     }
 
