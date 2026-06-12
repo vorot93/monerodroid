@@ -2,6 +2,7 @@ package com.sevendeuce.monerodroid.util
 
 import android.content.Context
 import android.util.Log
+import com.sevendeuce.monerodroid.R
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -16,8 +17,8 @@ sealed class BinaryStatus {
     object NotInstalled : BinaryStatus()
     object Installed : BinaryStatus()
     object Downloading : BinaryStatus()
+    object Verifying : BinaryStatus()
     object Extracting : BinaryStatus()
-    object InstallingBundled : BinaryStatus()
     object Updating : BinaryStatus()
     data class DownloadProgress(val progress: Int, val downloadedMb: Float, val totalMb: Float) : BinaryStatus()
     data class Error(val message: String) : BinaryStatus()
@@ -27,6 +28,7 @@ sealed class UpdateStatus {
     object Idle : UpdateStatus()
     object Checking : UpdateStatus()
     object Downloading : UpdateStatus()
+    object Verifying : UpdateStatus()
     object Extracting : UpdateStatus()
     data class Progress(val progress: Int, val downloadedMb: Float, val totalMb: Float) : UpdateStatus()
     data class Available(val currentVersion: String, val latestVersion: String) : UpdateStatus()
@@ -39,23 +41,37 @@ class MonerodBinaryManager(private val context: Context) {
 
     companion object {
         private const val TAG = "MonerodBinaryManager"
-        private const val BUNDLED_BINARY_NAME = "libmonerod.so"
+        private const val HASHES_URL = "https://www.getmonero.org/downloads/hashes.txt"
+    }
 
-        /**
-         * Get the system dynamic linker path for the current architecture.
-         * Used to execute binaries from noexec-mounted directories on Android 10+.
-         * The linker can load and run ELF binaries via mmap(PROT_EXEC), bypassing
-         * the SELinux execute_no_trans denial on app_data_file.
-         */
-        fun getSystemLinkerPath(): String? {
-            // Try 64-bit linker first (most modern devices)
-            val linker64 = File("/system/bin/linker64")
-            if (linker64.exists()) return linker64.absolutePath
-            // Fall back to 32-bit linker
-            val linker = File("/system/bin/linker")
-            if (linker.exists()) return linker.absolutePath
-            return null
+    private val verifier = BinaryVerifier()
+
+    private fun parseVersionFromFilename(filename: String): String? =
+        Regex("""v(\d+\.\d+\.\d+\.\d+)""").find(filename)?.groupValues?.get(1)
+
+    private fun loadPinnedCert(): ByteArray =
+        context.resources.openRawResource(R.raw.binaryfate).use { it.readBytes() }
+
+    private fun fetchHashes(): ByteArray {
+        val request = Request.Builder().url(HASHES_URL).build()
+        okHttpClient.newCall(request).execute().use { resp ->
+            if (!resp.isSuccessful) throw java.io.IOException("hashes.txt HTTP ${resp.code}")
+            return resp.body!!.bytes()
         }
+    }
+
+    /**
+     * Verify [archive] (downloaded from [finalUrl]) against binaryFate's signed hashes.
+     * Returns the resolved filename on success. Throws SecurityException on any verification failure.
+     */
+    private fun verifyArchiveOrThrow(archive: File, finalUrl: okhttp3.HttpUrl): String {
+        val filename = finalUrl.pathSegments.last()
+        val hashes = fetchHashes()
+        val cert = loadPinnedCert()
+        if (!verifier.verifyArchive(archive, filename, hashes, cert)) {
+            throw SecurityException("Downloaded file failed integrity check")
+        }
+        return filename
     }
 
     private val storageManager = StorageManager(context)
@@ -90,176 +106,14 @@ class MonerodBinaryManager(private val context: Context) {
     }
 
     fun isBinaryInstalled(): Boolean {
-        // Check native lib directory first (bundled binary)
-        val nativeLib = storageManager.getNativeLibMonerodPath()
-        if (nativeLib != null && nativeLib.exists()) {
-            Log.d(TAG, "Found bundled binary at: ${nativeLib.absolutePath}")
-            return true
-        }
-        // Fall back to copied binary
-        val binaryFile = storageManager.getMonerodBinaryPath()
+        val binaryFile = storageManager.getWritableBinaryPath()
         return binaryFile.exists() && binaryFile.canExecute()
     }
 
-    /**
-     * Check if bundled binary exists in the APK's native libs
-     */
-    fun isBundledBinaryAvailable(): Boolean {
-        val arch = ArchitectureDetector.detectArchitecture()
-        val nativeLibDir = context.applicationInfo.nativeLibraryDir
-        val bundledBinary = File(nativeLibDir, BUNDLED_BINARY_NAME)
-
-        Log.d(TAG, "Checking for bundled binary at: ${bundledBinary.absolutePath}")
-        Log.d(TAG, "Native lib dir: $nativeLibDir")
-        Log.d(TAG, "Architecture: $arch")
-
-        return bundledBinary.exists()
-    }
-
+    /** The installed version, read from version.txt (written at install time). */
     fun getBinaryVersion(): String? {
         if (!isBinaryInstalled()) return null
-
-        // Try to get version by running the binary directly
-        val version = tryGetBinaryVersion()
-        if (version != null) {
-            saveInstalledVersion(version)
-            return version
-        }
-
-        // Fallback 1: read saved version from disk
-        // This handles the case where the updated binary can't be executed
-        // (e.g. noexec / SELinux execute_no_trans denial on Android 10+)
-        // but we saved the version during the download/update process.
-        val saved = readSavedVersion()
-        if (saved != null) {
-            Log.d(TAG, "Using saved version as fallback: $saved")
-            return saved
-        }
-
-        // Fallback 2: try bundled binary directly for version.
-        // This handles fresh install where no saved version exists.
-        // NOTE: Do NOT save this version — it's the bundled version, not the installed/updated one.
-        val bundled = storageManager.getNativeLibMonerodPath()
-        if (bundled != null && bundled.exists()) {
-            val bundledVersion = runVersionCommandDirect(bundled.absolutePath)
-            if (bundledVersion != null) {
-                Log.d(TAG, "Using bundled binary version: $bundledVersion")
-                return bundledVersion
-            }
-        }
-
-        Log.w(TAG, "getBinaryVersion failed: no binary, saved, or bundled version available")
-        return null
-    }
-
-    /**
-     * Try to get the binary version by executing it.
-     * On Android 10+, if direct execution fails with Permission Denied (SELinux execute_no_trans
-     * denial on app_data_file), tries the system linker trick to bypass the restriction.
-     * Does NOT fall back to the bundled binary — that would report the wrong version.
-     */
-    private fun tryGetBinaryVersion(): String? {
-        val binaryFile = storageManager.getMonerodBinaryPath()
-        val writableBinary = storageManager.getWritableBinaryPath()
-
-        // If the writable (updated) binary doesn't exist, and getMonerodBinaryPath()
-        // returned the bundled binary, we don't want to run it here — that version
-        // would overwrite the saved version. Let getBinaryVersion() handle bundled fallback.
-        if (!writableBinary.exists()) {
-            // No updated binary — check if the binary path IS the bundled binary
-            val bundledPath = storageManager.getNativeLibMonerodPath()?.absolutePath
-            if (binaryFile.absolutePath == bundledPath) {
-                // Only bundled binary available — return null so getBinaryVersion()
-                // handles it via the bundled fallback (without saving the version)
-                return null
-            }
-        }
-
-        // Ensure the binary is executable before trying to run it
-        if (binaryFile.exists() && !binaryFile.canExecute()) {
-            Log.d(TAG, "Binary exists but not executable, attempting to fix: ${binaryFile.absolutePath}")
-            makeExecutable(binaryFile)
-        }
-
-        if (!binaryFile.canExecute()) {
-            Log.e(TAG, "Binary is not executable after fix attempt: ${binaryFile.absolutePath}")
-            return null
-        }
-
-        val binaryPath = binaryFile.absolutePath
-        Log.d(TAG, "Getting version from: $binaryPath")
-
-        // Try 1: Direct execution
-        try {
-            return runVersionCommandDirect(binaryPath)
-        } catch (e: java.io.IOException) {
-            if (e.message?.contains("Permission denied") != true) {
-                Log.e(TAG, "Error getting version", e)
-                return null
-            }
-            Log.w(TAG, "Direct execution blocked (Android 10+ SELinux), trying linker trick")
-        }
-
-        // Try 2: System linker trick — execute via /system/bin/linker64
-        // The linker loads the binary via mmap(PROT_EXEC), bypassing execute_no_trans denial.
-        val linkerPath = getSystemLinkerPath()
-        if (linkerPath != null) {
-            try {
-                val version = runVersionCommandViaLinker(linkerPath, binaryPath)
-                if (version != null) {
-                    Log.d(TAG, "Linker trick succeeded for version detection: $version")
-                    return version
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Linker trick failed for version detection", e)
-            }
-        }
-
-        Log.w(TAG, "All version detection methods failed for: $binaryPath")
-        return null
-    }
-
-    /**
-     * Execute the binary directly with --version and parse the version string.
-     * Throws IOException on Permission Denied (Android 10+ noexec).
-     */
-    private fun runVersionCommandDirect(binaryPath: String): String? {
-        Log.d(TAG, "Running version command: $binaryPath --version")
-        val process = ProcessBuilder(binaryPath, "--version")
-            .redirectErrorStream(true)
-            .start()
-
-        val output = process.inputStream.bufferedReader().readText()
-        val completed = process.waitFor(10, TimeUnit.SECONDS)
-        Log.d(TAG, "Version output: $output, completed: $completed")
-
-        return parseVersionFromOutput(output)
-    }
-
-    /**
-     * Execute a binary via the system linker to bypass noexec/SELinux restrictions.
-     * The linker loads the binary via mmap(PROT_EXEC) instead of execve().
-     */
-    private fun runVersionCommandViaLinker(linkerPath: String, binaryPath: String): String? {
-        Log.d(TAG, "Running version via linker: $linkerPath $binaryPath --version")
-        val process = ProcessBuilder(linkerPath, binaryPath, "--version")
-            .redirectErrorStream(true)
-            .start()
-
-        val output = process.inputStream.bufferedReader().readText()
-        val completed = process.waitFor(10, TimeUnit.SECONDS)
-        Log.d(TAG, "Linker version output: $output, completed: $completed")
-
-        return parseVersionFromOutput(output)
-    }
-
-    /**
-     * Parse version string from monerod output.
-     * Matches patterns like "Monero 'Fluorine Fermi' (v0.18.3.1-release)"
-     */
-    private fun parseVersionFromOutput(output: String): String? {
-        val versionRegex = """v(\d+\.\d+\.\d+\.\d+)""".toRegex()
-        return versionRegex.find(output)?.groupValues?.get(1)
+        return readSavedVersion()
     }
 
     /**
@@ -269,73 +123,13 @@ class MonerodBinaryManager(private val context: Context) {
         return storageManager.getMonerodBinaryPath().absolutePath
     }
 
-    /**
-     * Install binary - first tries bundled, then downloads if needed
-     */
     fun installBinary(): Flow<BinaryStatus> = flow {
-        // First check if already installed (includes bundled binary check)
         if (isBinaryInstalled()) {
-            Log.d(TAG, "Binary already available at: ${getBinaryPath()}")
             emit(BinaryStatus.Installed)
             return@flow
         }
-
-        // Check if bundled binary is available in native lib dir
-        // If so, it should have been detected by isBinaryInstalled already
-        // This is a fallback check
-        if (isBundledBinaryAvailable()) {
-            Log.d(TAG, "Bundled binary found, using directly from native lib dir")
-            emit(BinaryStatus.Installed)
-            return@flow
-        }
-
-        // Fall back to downloading
-        Log.d(TAG, "No bundled binary found, downloading...")
-        downloadAndInstallBinary().collect { status ->
-            emit(status)
-        }
+        downloadAndInstallBinary().collect { emit(it) }
     }.flowOn(Dispatchers.IO)
-
-    /**
-     * Install the bundled binary from APK's native libs
-     */
-    private fun installBundledBinary(): Boolean {
-        return try {
-            val nativeLibDir = context.applicationInfo.nativeLibraryDir
-            val bundledBinary = File(nativeLibDir, BUNDLED_BINARY_NAME)
-            val destBinary = storageManager.getMonerodBinaryPath()
-
-            if (!bundledBinary.exists()) {
-                Log.e(TAG, "Bundled binary not found at: ${bundledBinary.absolutePath}")
-                return false
-            }
-
-            destBinary.parentFile?.mkdirs()
-
-            // Delete existing file if present
-            if (destBinary.exists()) {
-                destBinary.delete()
-            }
-
-            // Copy the binary
-            bundledBinary.inputStream().use { input ->
-                FileOutputStream(destBinary).use { output ->
-                    input.copyTo(output)
-                }
-            }
-
-            // Make executable using multiple methods for compatibility
-            makeExecutable(destBinary)
-
-            Log.d(TAG, "Bundled binary installed successfully to: ${destBinary.absolutePath}")
-            Log.d(TAG, "Binary exists: ${destBinary.exists()}, canExecute: ${destBinary.canExecute()}")
-
-            destBinary.exists() && destBinary.canExecute()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to install bundled binary", e)
-            false
-        }
-    }
 
     /**
      * Make a file executable using multiple methods for Android compatibility
@@ -444,18 +238,27 @@ class MonerodBinaryManager(private val context: Context) {
                 }
             }
 
-            Log.d(TAG, "Download complete, extracting...")
+            val finalUrl = response.request.url
+
+            // Verify signature + SHA-256 BEFORE touching/executing anything.
+            emit(BinaryStatus.Verifying)
+            val filename = try {
+                verifyArchiveOrThrow(tempArchive, finalUrl)
+            } catch (e: SecurityException) {
+                tempArchive.delete()
+                emit(BinaryStatus.Error(e.message ?: "Verification failed"))
+                return@flow
+            }
+
+            Log.d(TAG, "Verified $filename, extracting...")
             emit(BinaryStatus.Extracting)
 
-            // Extract the binary using shell commands
             val extracted = extractBinaryWithShell(tempArchive)
-
-            // Clean up
             tempArchive.delete()
             File(context.cacheDir, "monero.tar").delete()
 
             if (extracted && isBinaryInstalled()) {
-                Log.d(TAG, "Binary installed successfully")
+                parseVersionFromFilename(filename)?.let { saveInstalledVersion(it) }
                 emit(BinaryStatus.Installed)
             } else {
                 emit(BinaryStatus.Error("Failed to extract monerod binary"))
@@ -700,31 +503,34 @@ class MonerodBinaryManager(private val context: Context) {
                 }
             }
 
-            Log.d(TAG, "Update download complete, extracting...")
+            val finalUrl = response.request.url
+
+            emit(UpdateStatus.Verifying)
+            val filename = try {
+                verifyArchiveOrThrow(tempArchive, finalUrl)
+            } catch (e: SecurityException) {
+                tempArchive.delete()
+                emit(UpdateStatus.Error(e.message ?: "Verification failed"))
+                return@flow
+            }
+
+            Log.d(TAG, "Verified update $filename, extracting...")
             emit(UpdateStatus.Extracting)
 
-            // Backup existing binary to writable directory
             val existingBinary = storageManager.getMonerodBinaryPath()
             val binaryDir = storageManager.getBinaryDir()
             val backupBinary = File(binaryDir, "monerod.backup")
-            if (existingBinary.exists()) {
-                existingBinary.copyTo(backupBinary, overwrite = true)
-            }
+            if (existingBinary.exists()) existingBinary.copyTo(backupBinary, overwrite = true)
 
-            // Extract the new binary
             val extracted = extractBinaryWithShell(tempArchive)
-
-            // Clean up
             tempArchive.delete()
             File(context.cacheDir, "monero_update.tar").delete()
 
             if (extracted && isBinaryInstalled()) {
-                // Success - remove backup
                 backupBinary.delete()
-                Log.d(TAG, "Binary updated successfully")
+                parseVersionFromFilename(filename)?.let { saveInstalledVersion(it) }
                 emit(UpdateStatus.Success)
             } else {
-                // Restore backup to writable location
                 if (backupBinary.exists()) {
                     val destBinary = storageManager.getWritableBinaryPath()
                     backupBinary.copyTo(destBinary, overwrite = true)
